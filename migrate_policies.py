@@ -59,6 +59,25 @@ def fetch_policy_detail(stack_url, token, policy_id):
     return resp.json()
 
 
+def fetch_saved_search(stack_url, token, search_id):
+    resp = requests.get(
+        f"{stack_url}/search/history/{search_id}",
+        headers=get_auth_headers(token),
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def create_saved_search(stack_url, token, search_id, search_data):
+    resp = requests.post(
+        f"{stack_url}/search/history/{search_id}",
+        headers=get_auth_headers(token),
+        json=search_data,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def create_policy(stack_url, token, policy):
     resp = requests.post(
         f"{stack_url}/policy",
@@ -128,6 +147,16 @@ def main():
             policy_id = policy["policyId"]
             print(f"  Fetching details for {original_name} ({policy_id})...")
             full_policy = fetch_policy_detail(STACK_URL_1, token1, policy_id)
+
+            rule = full_policy.get("rule", {})
+            search_id = rule.get("criteria")
+            if search_id:
+                print(f"  Fetching saved search {search_id} from Tenant 1...")
+                search_data = fetch_saved_search(STACK_URL_1, token1, search_id)
+                search_data["saved"] = True
+                print(f"  Creating saved search {search_id} in Tenant 2...")
+                create_saved_search(STACK_URL_2, token2, search_id, search_data)
+
             payload = build_migration_payload(full_policy)
             create_policy(STACK_URL_2, token2, payload)
             print(f"  [OK] {new_name}")
