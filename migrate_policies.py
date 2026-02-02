@@ -70,8 +70,14 @@ def fetch_saved_search(stack_url, token, search_id):
 
 def build_saved_search_payload(search_data):
     READ_ONLY_FIELDS = [
-        "alertId", "async", "asyncResultUrl", "cursor",
-        "filters", "groupBy", "readOnly", "searchType",
+        "alertId",
+        "async",
+        "asyncResultUrl",
+        "cursor",
+        "filters",
+        "groupBy",
+        "readOnly",
+        "searchType",
         "timeGranularity",
     ]
     payload = {}
@@ -84,32 +90,65 @@ def build_saved_search_payload(search_data):
 
 def create_saved_search(stack_url, token, search_id, search_data):
     payload = build_saved_search_payload(search_data)
+    import json
+
+    print(f"  DEBUG payload keys: {list(payload.keys())}")
+    print(f"  DEBUG payload: {json.dumps(payload, indent=2)}")
     resp = requests.post(
         f"{stack_url}/search/history/{search_id}",
         headers=get_auth_headers(token),
         json=payload,
     )
+    if resp.status_code != 200:
+        print(f"  DEBUG response status: {resp.status_code}")
+        print(f"  DEBUG response body: {resp.text}")
     resp.raise_for_status()
     return resp.json()
 
 
 def create_policy(stack_url, token, policy):
+    import json
+    print(f"  DEBUG policy payload keys: {list(policy.keys())}")
+    print(f"  DEBUG policy payload: {json.dumps(policy, indent=2, default=str)}")
     resp = requests.post(
         f"{stack_url}/policy",
         headers=get_auth_headers(token),
         json=policy,
     )
+    if resp.status_code != 200:
+        print(f"  DEBUG create_policy status: {resp.status_code}")
+        print(f"  DEBUG create_policy headers: {dict(resp.headers)}")
+        print(f"  DEBUG create_policy response: {resp.text}")
     resp.raise_for_status()
     return resp.json()
 
 
+def update_rule_for_migration(rule, original_name, new_name):
+    import copy
+    rule = copy.deepcopy(rule)
+    if rule.get("name") == original_name:
+        rule["name"] = new_name
+    children = rule.get("children", [])
+    for child in children:
+        metadata = child.get("metadata", {})
+        code = metadata.get("code")
+        if code and original_name in code:
+            metadata["code"] = code.replace(original_name, new_name)
+    return rule
+
+
 def build_migration_payload(policy):
+    original_name = policy["name"]
+    new_name = original_name + MIGRATION_SUFFIX
+    rule = policy.get("rule")
+    if rule:
+        rule = update_rule_for_migration(rule, original_name, new_name)
     payload = {
-        "name": policy["name"] + MIGRATION_SUFFIX,
+        "name": new_name,
         "policyType": policy.get("policyType"),
         "severity": policy.get("severity"),
         "description": policy.get("description", ""),
-        "rule": policy.get("rule"),
+        "rule": rule,
         "recommendation": policy.get("recommendation", ""),
         "enabled": policy.get("enabled", True),
         "labels": policy.get("labels", []),
@@ -188,8 +227,11 @@ def main():
             print(f"  [FAIL] {new_name}: {e}")
             errors.append((new_name, str(e), ""))
             failed += 1
+        break  # Remove this break to process all policies
 
-    print(f"\nMigration complete: {migrated} succeeded, {failed} failed out of {len(custom_policies)} policies.")
+    print(
+        f"\nMigration complete: {migrated} succeeded, {failed} failed out of {len(custom_policies)} policies."
+    )
     if errors:
         print("\nFailed policies:")
         for name, err, detail in errors:
