@@ -68,11 +68,26 @@ def fetch_saved_search(stack_url, token, search_id):
     return resp.json()
 
 
+def build_saved_search_payload(search_data):
+    READ_ONLY_FIELDS = [
+        "alertId", "async", "asyncResultUrl", "cursor",
+        "filters", "groupBy", "readOnly", "searchType",
+        "timeGranularity",
+    ]
+    payload = {}
+    for key, value in search_data.items():
+        if key not in READ_ONLY_FIELDS:
+            payload[key] = value
+    payload["saved"] = True
+    return payload
+
+
 def create_saved_search(stack_url, token, search_id, search_data):
+    payload = build_saved_search_payload(search_data)
     resp = requests.post(
         f"{stack_url}/search/history/{search_id}",
         headers=get_auth_headers(token),
-        json=search_data,
+        json=payload,
     )
     resp.raise_for_status()
     return resp.json()
@@ -153,7 +168,6 @@ def main():
             if search_id:
                 print(f"  Fetching saved search {search_id} from Tenant 1...")
                 search_data = fetch_saved_search(STACK_URL_1, token1, search_id)
-                search_data["saved"] = True
                 print(f"  Creating saved search {search_id} in Tenant 2...")
                 create_saved_search(STACK_URL_2, token2, search_id, search_data)
 
