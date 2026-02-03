@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import requests
 from dotenv import load_dotenv
 
@@ -14,6 +15,7 @@ ACCESS_ID_2 = os.getenv("ACCESS_ID_2", "")
 SECRET_KEY_2 = os.getenv("SECRET_KEY_2", "")
 
 MIGRATION_SUFFIX = "_AF_migration"
+TOKEN_REFRESH_SECONDS = 8 * 60  # refresh before 10-minute expiry
 
 
 def authenticate(stack_url, access_id, secret_key):
@@ -27,6 +29,22 @@ def authenticate(stack_url, access_id, secret_key):
     if not token:
         raise RuntimeError(f"No token returned from {stack_url}/login")
     return token
+
+
+class TokenManager:
+    def __init__(self, stack_url, access_id, secret_key):
+        self.stack_url = stack_url
+        self.access_id = access_id
+        self.secret_key = secret_key
+        self.token = None
+        self.issued_at = 0
+
+    def get_token(self):
+        if self.token is None or (time.time() - self.issued_at) >= TOKEN_REFRESH_SECONDS:
+            print(f"  Refreshing token for {self.stack_url}...")
+            self.token = authenticate(self.stack_url, self.access_id, self.secret_key)
+            self.issued_at = time.time()
+        return self.token
 
 
 def get_auth_headers(token):
@@ -121,7 +139,9 @@ def save_search(stack_url, token, search_id, name, query, time_range):
             existing_id = find_saved_search_by_name(stack_url, token, name)
             if existing_id:
                 return {"id": existing_id}
-            print(f"  WARNING: Could not find existing saved search by name, using current ID")
+            print(
+                f"  WARNING: Could not find existing saved search by name, using current ID"
+            )
             return {"id": search_id}
     if resp.status_code != 200:
         print(f"  DEBUG save_search status: {resp.status_code}")
@@ -214,23 +234,34 @@ def main():
             print(f"Error: {name} is not set in .env")
             sys.exit(1)
 
+    tm1 = TokenManager(STACK_URL_1, ACCESS_ID_1, SECRET_KEY_1)
+    tm2 = TokenManager(STACK_URL_2, ACCESS_ID_2, SECRET_KEY_2)
+
     print("Authenticating to Tenant 1...")
-    token1 = authenticate(STACK_URL_1, ACCESS_ID_1, SECRET_KEY_1)
+    tm1.get_token()
     print("Authenticated to Tenant 1.")
 
     print("Authenticating to Tenant 2...")
-    token2 = authenticate(STACK_URL_2, ACCESS_ID_2, SECRET_KEY_2)
+    tm2.get_token()
     print("Authenticated to Tenant 2.")
 
     print("Fetching custom policies from Tenant 1...")
-    custom_policies = fetch_custom_policies(STACK_URL_1, token1)
+    custom_policies = fetch_custom_policies(STACK_URL_1, tm1.get_token())
     print(f"Found {len(custom_policies)} custom policies.")
 
     if not custom_policies:
         print("No custom policies to migrate.")
         return
 
+    print("Fetching existing policies from Tenant 2...")
+    existing_policies_t2 = fetch_custom_policies(STACK_URL_2, tm2.get_token())
+    existing_names_t2 = set()
+    for p in existing_policies_t2:
+        existing_names_t2.add(p.get("name", ""))
+    print(f"Found {len(existing_names_t2)} existing custom policies in Tenant 2.")
+
     migrated = 0
+    skipped = 0
     failed = 0
     errors = []
 
@@ -242,28 +273,41 @@ def main():
             # ipdb.set_trace()
             if policy.get("policySubTypes") != ["run"]:
                 continue
+            if new_name in existing_names_t2:
+                print(f"  [SKIP] {new_name} already exists in Tenant 2.")
+                skipped += 1
+                continue
             policy_id = policy["policyId"]
             print(f"  Fetching details for {original_name} ({policy_id})...")
-            full_policy = fetch_policy_detail(STACK_URL_1, token1, policy_id)
+            full_policy = fetch_policy_detail(STACK_URL_1, tm1.get_token(), policy_id)
 
             rule = full_policy.get("rule", {})
             search_id = rule.get("criteria")
             if search_id:
                 print(f"  Fetching saved search {search_id} from Tenant 1...")
-                search_data = fetch_saved_search(STACK_URL_1, token1, search_id)
+                search_data = fetch_saved_search(STACK_URL_1, tm1.get_token(), search_id)
                 query = search_data.get("query", "")
-                time_range = search_data.get("timeRange", {"type": "relative", "value": {"unit": "hour", "amount": 24}})
+                time_range = search_data.get(
+                    "timeRange",
+                    {"type": "relative", "value": {"unit": "hour", "amount": 24}},
+                )
                 print(f"  Running search query on Tenant 2...")
-                search_result = run_search_on_tenant(STACK_URL_2, token2, query, time_range)
+                search_result = run_search_on_tenant(
+                    STACK_URL_2, tm2.get_token(), query, time_range
+                )
                 new_search_id = search_result.get("id", search_id)
-                search_name = search_data.get("name") or (original_name + MIGRATION_SUFFIX)
+                search_name = search_data.get("name") or (
+                    original_name + MIGRATION_SUFFIX
+                )
                 print(f"  Saving search {new_search_id} in Tenant 2...")
-                save_result = save_search(STACK_URL_2, token2, new_search_id, search_name, query, time_range)
+                save_result = save_search(
+                    STACK_URL_2, tm2.get_token(), new_search_id, search_name, query, time_range
+                )
                 final_search_id = save_result.get("id", new_search_id)
                 rule["criteria"] = final_search_id
 
             payload = build_migration_payload(full_policy)
-            create_policy(STACK_URL_2, token2, payload)
+            create_policy(STACK_URL_2, tm2.get_token(), payload)
             print(f"  [OK] {new_name}")
             migrated += 1
         except requests.exceptions.HTTPError as e:
@@ -279,10 +323,9 @@ def main():
             print(f"  [FAIL] {new_name}: {e}")
             errors.append((new_name, str(e), ""))
             failed += 1
-        break  # Remove this break to process all policies
 
     print(
-        f"\nMigration complete: {migrated} succeeded, {failed} failed out of {len(custom_policies)} policies."
+        f"\nMigration complete: {migrated} succeeded, {skipped} skipped, {failed} failed out of {len(custom_policies)} policies."
     )
     if errors:
         print("\nFailed policies:")
