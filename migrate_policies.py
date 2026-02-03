@@ -128,9 +128,25 @@ def build_saved_search_payload(search_data):
     return payload
 
 
+def get_search_endpoint(query):
+    query_lower = query.strip().lower()
+    if query_lower.startswith("config from iam"):
+        return "/search/iam"
+    elif query_lower.startswith("config"):
+        return "/search/config"
+    elif query_lower.startswith("event"):
+        return "/search/event"
+    elif query_lower.startswith("network"):
+        return "/search/network"
+    else:
+        return "/search/config"
+
+
 def run_search_on_tenant(stack_url, token, query, time_range):
+    endpoint = get_search_endpoint(query)
+    log(f"  Using search endpoint: {endpoint}")
     resp = requests.post(
-        f"{stack_url}/search/config",
+        f"{stack_url}{endpoint}",
         headers=get_auth_headers(token),
         json={"query": query, "timeRange": time_range},
     )
