@@ -88,26 +88,65 @@ def build_saved_search_payload(search_data):
     return payload
 
 
-def create_saved_search(stack_url, token, search_id, search_data):
-    payload = build_saved_search_payload(search_data)
-    import json
+def run_search_on_tenant(stack_url, token, query, time_range):
+    resp = requests.post(
+        f"{stack_url}/search/config",
+        headers=get_auth_headers(token),
+        json={"query": query, "timeRange": time_range},
+    )
+    if resp.status_code != 200:
+        print(f"  DEBUG run_search status: {resp.status_code}")
+        print(f"  DEBUG run_search headers: {dict(resp.headers)}")
+        print(f"  DEBUG run_search body: {resp.text}")
+    resp.raise_for_status()
+    return resp.json()
 
-    print(f"  DEBUG payload keys: {list(payload.keys())}")
-    print(f"  DEBUG payload: {json.dumps(payload, indent=2)}")
+
+def save_search(stack_url, token, search_id, name, query, time_range):
+    payload = {
+        "name": name,
+        "query": query,
+        "timeRange": time_range,
+        "saved": True,
+    }
     resp = requests.post(
         f"{stack_url}/search/history/{search_id}",
         headers=get_auth_headers(token),
         json=payload,
     )
+    if resp.status_code == 400:
+        status_header = resp.headers.get("x-redlock-status", "")
+        if "duplicate_search_name" in status_header:
+            print(f"  Saved search '{name}' already exists, looking up existing ID...")
+            existing_id = find_saved_search_by_name(stack_url, token, name)
+            if existing_id:
+                return {"id": existing_id}
+            print(f"  WARNING: Could not find existing saved search by name, using current ID")
+            return {"id": search_id}
     if resp.status_code != 200:
-        print(f"  DEBUG response status: {resp.status_code}")
-        print(f"  DEBUG response body: {resp.text}")
+        print(f"  DEBUG save_search status: {resp.status_code}")
+        print(f"  DEBUG save_search headers: {dict(resp.headers)}")
+        print(f"  DEBUG save_search body: {resp.text}")
     resp.raise_for_status()
     return resp.json()
 
 
+def find_saved_search_by_name(stack_url, token, name):
+    resp = requests.get(
+        f"{stack_url}/search/history",
+        headers=get_auth_headers(token),
+        params={"filter": "saved"},
+    )
+    resp.raise_for_status()
+    for search in resp.json():
+        if search.get("name") == name:
+            return search.get("id")
+    return None
+
+
 def create_policy(stack_url, token, policy):
     import json
+
     print(f"  DEBUG policy payload keys: {list(policy.keys())}")
     print(f"  DEBUG policy payload: {json.dumps(policy, indent=2, default=str)}")
     resp = requests.post(
@@ -125,6 +164,7 @@ def create_policy(stack_url, token, policy):
 
 def update_rule_for_migration(rule, original_name, new_name):
     import copy
+
     rule = copy.deepcopy(rule)
     if rule.get("name") == original_name:
         rule["name"] = new_name
@@ -152,7 +192,7 @@ def build_migration_payload(policy):
         "recommendation": policy.get("recommendation", ""),
         "enabled": policy.get("enabled", True),
         "labels": policy.get("labels", []),
-        "complianceMetadata": policy.get("complianceMetadata", []),
+        "complianceMetadata": [],
     }
     if policy.get("policySubTypes"):
         payload["policySubTypes"] = policy["policySubTypes"]
@@ -198,6 +238,10 @@ def main():
         original_name = policy["name"]
         new_name = original_name + MIGRATION_SUFFIX
         try:
+            # import ipdb
+            # ipdb.set_trace()
+            if policy.get("policySubTypes") != ["run"]:
+                continue
             policy_id = policy["policyId"]
             print(f"  Fetching details for {original_name} ({policy_id})...")
             full_policy = fetch_policy_detail(STACK_URL_1, token1, policy_id)
@@ -207,8 +251,16 @@ def main():
             if search_id:
                 print(f"  Fetching saved search {search_id} from Tenant 1...")
                 search_data = fetch_saved_search(STACK_URL_1, token1, search_id)
-                print(f"  Creating saved search {search_id} in Tenant 2...")
-                create_saved_search(STACK_URL_2, token2, search_id, search_data)
+                query = search_data.get("query", "")
+                time_range = search_data.get("timeRange", {"type": "relative", "value": {"unit": "hour", "amount": 24}})
+                print(f"  Running search query on Tenant 2...")
+                search_result = run_search_on_tenant(STACK_URL_2, token2, query, time_range)
+                new_search_id = search_result.get("id", search_id)
+                search_name = search_data.get("name") or (original_name + MIGRATION_SUFFIX)
+                print(f"  Saving search {new_search_id} in Tenant 2...")
+                save_result = save_search(STACK_URL_2, token2, new_search_id, search_name, query, time_range)
+                final_search_id = save_result.get("id", new_search_id)
+                rule["criteria"] = final_search_id
 
             payload = build_migration_payload(full_policy)
             create_policy(STACK_URL_2, token2, payload)
