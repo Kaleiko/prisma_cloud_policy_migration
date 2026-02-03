@@ -19,10 +19,11 @@ def setup_logging():
 
 
 def log(message):
-    log(message)
+    print(message)
     if LOG_FILE:
         LOG_FILE.write(message + "\n")
         LOG_FILE.flush()
+
 
 STACK_URL_1 = os.getenv("PRISMA_CLOUD_STACK_URL_1", "").rstrip("/")
 ACCESS_ID_1 = os.getenv("ACCESS_ID_1", "")
@@ -58,7 +59,10 @@ class TokenManager:
         self.issued_at = 0
 
     def get_token(self):
-        if self.token is None or (time.time() - self.issued_at) >= TOKEN_REFRESH_SECONDS:
+        if (
+            self.token is None
+            or (time.time() - self.issued_at) >= TOKEN_REFRESH_SECONDS
+        ):
             log(f"  Refreshing token for {self.stack_url}...")
             self.token = authenticate(self.stack_url, self.access_id, self.secret_key)
             self.issued_at = time.time()
@@ -291,8 +295,8 @@ def main():
         try:
             # import ipdb
             # ipdb.set_trace()
-            if policy.get("policySubTypes") != ["run"]:
-                continue
+            # if policy.get("policySubTypes") != ["run"]:
+            #     continue
             if new_name in existing_names_t2:
                 log(f"  [SKIP] {new_name} already exists in Tenant 2.")
                 skipped += 1
@@ -305,7 +309,9 @@ def main():
             search_id = rule.get("criteria")
             if search_id:
                 log(f"  Fetching saved search {search_id} from Tenant 1...")
-                search_data = fetch_saved_search(STACK_URL_1, tm1.get_token(), search_id)
+                search_data = fetch_saved_search(
+                    STACK_URL_1, tm1.get_token(), search_id
+                )
                 query = search_data.get("query", "")
                 time_range = search_data.get(
                     "timeRange",
@@ -321,7 +327,12 @@ def main():
                 )
                 log(f"  Saving search {new_search_id} in Tenant 2...")
                 save_result = save_search(
-                    STACK_URL_2, tm2.get_token(), new_search_id, search_name, query, time_range
+                    STACK_URL_2,
+                    tm2.get_token(),
+                    new_search_id,
+                    search_name,
+                    query,
+                    time_range,
                 )
                 final_search_id = save_result.get("id", new_search_id)
                 rule["criteria"] = final_search_id
